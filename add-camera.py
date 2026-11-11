@@ -28,6 +28,7 @@ client_path = os.path.join(main_dir, "CameraChromeClient.java")
 client_src = '''package __PKG__;
 
 import android.app.Activity;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.net.Uri;
 import android.provider.MediaStore;
@@ -36,19 +37,15 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebView;
 
 import androidx.appcompat.app.AlertDialog;
-import androidx.core.content.FileProvider;
 
 import com.getcapacitor.Bridge;
 import com.getcapacitor.BridgeWebChromeClient;
-
-import java.io.File;
-import java.text.SimpleDateFormat;
-import java.util.Date;
 
 // 在网页文件选择器中加入「拍照」入口（继承 Capacitor 自带的 BridgeWebChromeClient，
 // 保留其原有的定位/日志等行为，只扩展文件选择）。
 // 用自己的 AlertDialog 选择「拍照 / 从相册选择」，比塞进系统选择器的
 // EXTRA_INITIAL_INTENTS 在各机型上更可靠。
+// 拍照输出到系统媒体库(MediaStore)的 Uri，这是 OEM 相机兼容性最好的方式。
 public class CameraChromeClient extends BridgeWebChromeClient {
     private final Activity activity;
     private ValueCallback<Uri[]> uploadCallback;
@@ -86,35 +83,38 @@ public class CameraChromeClient extends BridgeWebChromeClient {
     }
 
     private void openGallery(String mime) {
-        Intent content = new Intent(Intent.ACTION_GET_CONTENT);
-        content.addCategory(Intent.CATEGORY_OPENABLE);
-        content.setType(mime);
-        activity.startActivityForResult(content, REQ_GALLERY);
-    }
-
-    private void openCamera() {
-        Intent capture = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-        File photoFile = createImageFile();
-        if (photoFile != null) {
-            String authority = activity.getPackageName() + ".fileprovider";
-            cameraOutputUri = FileProvider.getUriForFile(activity, authority, photoFile);
-            capture.putExtra(MediaStore.EXTRA_OUTPUT, cameraOutputUri);
-            capture.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-            activity.startActivityForResult(capture, REQ_CAMERA);
-        } else {
+        try {
+            Intent content = new Intent(Intent.ACTION_GET_CONTENT);
+            content.addCategory(Intent.CATEGORY_OPENABLE);
+            content.setType(mime);
+            activity.startActivityForResult(content, REQ_GALLERY);
+        } catch (Exception e) {
             finishWith(null);
         }
     }
 
-    private File createImageFile() {
+    private void openCamera() {
         try {
-            String ts = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
-            File base = (activity.getExternalCacheDir() != null) ? activity.getExternalCacheDir() : activity.getCacheDir();
-            File dir = new File(base, "captured");
-            dir.mkdirs();
-            return new File(dir, "IMG_" + ts + ".jpg");
+            Intent capture = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            if (capture.resolveActivity(activity.getPackageManager()) == null) {
+                // 设备没有相机应用，退回相册
+                openGallery("image/*");
+                return;
+            }
+            // 在媒体库建一个条目，把它的 Uri 作为拍照输出（兼容性最好）
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+            values.put(MediaStore.Images.Media.DISPLAY_NAME, "IMG_" + System.currentTimeMillis() + ".jpg");
+            cameraOutputUri = activity.getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+            if (cameraOutputUri == null) {
+                openGallery("image/*");
+                return;
+            }
+            capture.putExtra(MediaStore.EXTRA_OUTPUT, cameraOutputUri);
+            activity.startActivityForResult(capture, REQ_CAMERA);
         } catch (Exception e) {
-            return null;
+            // 任何异常都退回相册，避免闪退
+            openGallery("image/*");
         }
     }
 
