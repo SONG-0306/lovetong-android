@@ -35,6 +35,7 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebView;
 
+import androidx.appcompat.app.AlertDialog;
 import androidx.core.content.FileProvider;
 
 import com.getcapacitor.Bridge;
@@ -46,11 +47,14 @@ import java.util.Date;
 
 // 在网页文件选择器中加入「拍照」入口（继承 Capacitor 自带的 BridgeWebChromeClient，
 // 保留其原有的定位/日志等行为，只扩展文件选择）。
+// 用自己的 AlertDialog 选择「拍照 / 从相册选择」，比塞进系统选择器的
+// EXTRA_INITIAL_INTENTS 在各机型上更可靠。
 public class CameraChromeClient extends BridgeWebChromeClient {
     private final Activity activity;
     private ValueCallback<Uri[]> uploadCallback;
     private Uri cameraOutputUri;
-    private static final int REQ_CHOOSER = 0xCAFE;
+    private static final int REQ_CAMERA = 0xCAFE1;
+    private static final int REQ_GALLERY = 0xCAFE2;
 
     public CameraChromeClient(Activity activity, Bridge bridge) {
         super(bridge);
@@ -62,18 +66,33 @@ public class CameraChromeClient extends BridgeWebChromeClient {
                                      FileChooserParams params) {
         this.uploadCallback = filePathCallback;
 
-        // 相册 / 文件
+        String[] acceptTypes = (params != null) ? params.getAcceptTypes() : null;
+        String mime = (acceptTypes != null && acceptTypes.length > 0 && acceptTypes[0] != null && !acceptTypes[0].isEmpty())
+                ? acceptTypes[0] : "*/*";
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(activity);
+        builder.setTitle("选择图片来源");
+        builder.setItems(new String[]{"拍照", "从相册选择"}, (dialog, which) -> {
+            if (which == 0) {
+                openCamera();
+            } else {
+                openGallery(mime);
+            }
+        });
+        // 取消（返回键 / 点对话框外）也要回调 null，否则网页的 file input 会卡住
+        builder.setOnCancelListener(d -> finishWith(null));
+        builder.show();
+        return true;
+    }
+
+    private void openGallery(String mime) {
         Intent content = new Intent(Intent.ACTION_GET_CONTENT);
         content.addCategory(Intent.CATEGORY_OPENABLE);
-        String[] acceptTypes = (params != null) ? params.getAcceptTypes() : null;
-        if (acceptTypes != null && acceptTypes.length > 0 && acceptTypes[0] != null && !acceptTypes[0].isEmpty()) {
-            content.setType(acceptTypes[0]);
-            content.putExtra(Intent.EXTRA_MIME_TYPES, acceptTypes);
-        } else {
-            content.setType("*/*");
-        }
+        content.setType(mime);
+        activity.startActivityForResult(content, REQ_GALLERY);
+    }
 
-        // 拍照（输出到 FileProvider 提供的 Uri，工程已自带 provider）
+    private void openCamera() {
         Intent capture = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
         File photoFile = createImageFile();
         if (photoFile != null) {
@@ -81,22 +100,17 @@ public class CameraChromeClient extends BridgeWebChromeClient {
             cameraOutputUri = FileProvider.getUriForFile(activity, authority, photoFile);
             capture.putExtra(MediaStore.EXTRA_OUTPUT, cameraOutputUri);
             capture.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            activity.startActivityForResult(capture, REQ_CAMERA);
         } else {
-            capture = null;
+            finishWith(null);
         }
-
-        Intent chooser = Intent.createChooser(content, "选择图片来源");
-        if (capture != null) {
-            chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{capture});
-        }
-        activity.startActivityForResult(chooser, REQ_CHOOSER);
-        return true;
     }
 
     private File createImageFile() {
         try {
             String ts = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
-            File dir = new File(activity.getCacheDir(), "captured");
+            File base = (activity.getExternalCacheDir() != null) ? activity.getExternalCacheDir() : activity.getCacheDir();
+            File dir = new File(base, "captured");
             dir.mkdirs();
             return new File(dir, "IMG_" + ts + ".jpg");
         } catch (Exception e) {
@@ -104,19 +118,29 @@ public class CameraChromeClient extends BridgeWebChromeClient {
         }
     }
 
+    private void finishWith(Uri[] results) {
+        if (uploadCallback != null) {
+            uploadCallback.onReceiveValue(results);
+            uploadCallback = null;
+        }
+        cameraOutputUri = null;
+    }
+
     public void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode != REQ_CHOOSER || uploadCallback == null) return;
-        Uri[] results = null;
-        if (resultCode == Activity.RESULT_OK) {
-            if (data != null && data.getData() != null) {
-                results = new Uri[]{data.getData()};
-            } else if (cameraOutputUri != null) {
-                results = new Uri[]{cameraOutputUri};
+        if (uploadCallback == null) return;
+        if (requestCode == REQ_CAMERA) {
+            if (resultCode == Activity.RESULT_OK && cameraOutputUri != null) {
+                finishWith(new Uri[]{cameraOutputUri});
+            } else {
+                finishWith(null);
+            }
+        } else if (requestCode == REQ_GALLERY) {
+            if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
+                finishWith(new Uri[]{data.getData()});
+            } else {
+                finishWith(null);
             }
         }
-        uploadCallback.onReceiveValue(results);
-        uploadCallback = null;
-        cameraOutputUri = null;
     }
 }
 '''.replace("__PKG__", pkg)
