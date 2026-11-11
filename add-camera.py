@@ -38,33 +38,51 @@ HOOK_JS = r"""
 
   function takePhoto(input) {
     var C = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Camera;
-    if (!C) { input.click(); return; }
+    if (!C) { suppress = true; input.click(); return; }
     C.getPhoto({
       source: 'CAMERA',
       resultType: 'DataUrl',
       saveToGallery: false,
       allowEditing: false
     }).then(function (res) {
-      if (!res || !res.dataUrl) return;
+      if (!res || !res.dataUrl) { suppress = true; input.click(); return; }
       var file = dataUrlToFile(res.dataUrl, 'photo_' + Date.now() + '.jpg');
       setInputFiles(input, file);
     }).catch(function (err) {
-      // 用户取消或出错：不处理
+      // 用户取消或相机不可用：退回系统选择器
+      suppress = true;
+      input.click();
     });
   }
 
   var suppress = false;
 
+  // 向上查找被点击元素里的 <input type=file>（很多站把 input 藏在按钮/标签里）
+  function findFileInput(node) {
+    while (node && node !== document) {
+      if (node.tagName === 'INPUT' && node.type === 'file') return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  function isImageInput(input) {
+    var accept = (input.getAttribute('accept') || '').toLowerCase().trim();
+    if (accept === '' || accept === '*/*') return true;          // 未限定 / 任意
+    if (accept.indexOf('image') !== -1) return true;            // image/* 或 image/png
+    if (/\.(jpe?g|png|gif|webp|bmp|heic)/.test(accept)) return true; // 扩展名写法
+    return false;
+  }
+
   document.addEventListener('click', function (e) {
     if (suppress) { suppress = false; return; }
-    var t = e.target;
-    if (t && t.tagName === 'INPUT' && t.type === 'file') {
-      var accept = (t.getAttribute('accept') || '').toLowerCase();
-      if (accept.indexOf('image') === -1) return;
-      e.preventDefault();
-      e.stopPropagation();
-      showChooser(t);
-    }
+    var input = findFileInput(e.target);
+    if (!input || !isImageInput(input)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    if (e.cancelBubble !== undefined) e.cancelBubble = true;
+    showChooser(input);
   }, true);
 
   function showChooser(input) {
@@ -95,8 +113,6 @@ HOOK_JS = r"""
 """
 
 MAIN_BODY = '''public class MainActivity extends BridgeActivity {
-    private boolean hookInjected = false;
-
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -105,10 +121,9 @@ MAIN_BODY = '''public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
-        if (!hookInjected) {
-            injectCameraHook();
-            hookInjected = true;
-        }
+        // 每次回到前台都重新注入（内部有 window 守卫，不会重复绑定监听；
+        // 但可覆盖 SPA 内跳页导致脚本丢失的情况）
+        injectCameraHook();
     }
 
     // 把 camera-hook.js 注入到网页，拦截图片上传框，加入拍照能力
@@ -160,19 +175,17 @@ def main():
         except OSError:
             pass
 
-    if "injectCameraHook" in main_src:
-        print("[add-camera] MainActivity 已打过补丁，跳过。")
-    else:
-        desired = (
-            "package " + pkg + ";\n\n"
-            "import android.os.Bundle;\n"
-            "import android.webkit.WebView;\n\n"
-            "import com.getcapacitor.BridgeActivity;\n\n"
-            + MAIN_BODY + "\n"
-        )
-        with open(main_path, "w", encoding="utf-8") as f:
-            f.write(desired)
-        print("[add-camera] 已为 MainActivity 注入相机脚本。")
+    # 始终按最新模板重写 MainActivity，确保补丁更新能覆盖旧版本
+    desired = (
+        "package " + pkg + ";\n\n"
+        "import android.os.Bundle;\n"
+        "import android.webkit.WebView;\n\n"
+        "import com.getcapacitor.BridgeActivity;\n\n"
+        + MAIN_BODY + "\n"
+    )
+    with open(main_path, "w", encoding="utf-8") as f:
+        f.write(desired)
+    print("[add-camera] 已为 MainActivity 注入相机脚本。")
 
     # 3) 确保声明 CAMERA 权限（Capacitor Camera 插件也会加，双保险）
     manifest_path = os.path.join(ROOT, "AndroidManifest.xml")
