@@ -22,6 +22,11 @@ on:
         description: '下载用的 Artifact 名称（留空则按 app_name 生成）'
         required: false
         default: ''
+      enable_camera:
+        description: '是否支持网页内拍照上传（WebView 文件选择器加入相机入口）'
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -78,6 +83,10 @@ jobs:
 
       - name: Add and sync Android platform
         run: npx cap add android && npx cap sync android
+
+      - name: Patch WebView for camera upload
+        if: ${{ github.event.inputs.enable_camera == 'true' }}
+        run: python3 add-camera.py
 
       - name: Build debug APK
         run: cd android && chmod +x ./gradlew && ./gradlew assembleDebug
