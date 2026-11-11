@@ -149,7 +149,7 @@ else:
     }
 
     @Override
-    protected void onResume() {
+    public void onResume() {
         super.onResume();
         // 每次回到前台都确保自定义 client 仍生效（防止被框架覆盖）
         if (cameraChromeClient != null) {
