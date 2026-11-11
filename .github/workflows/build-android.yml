@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -24,15 +25,19 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # GitHub ubuntu runner ships a preinstalled Android SDK at $ANDROID_HOME.
-      # We accept all licenses non-interactively (yes | sdkmanager --licenses)
-      # and install the platform/build-tools Capacitor needs. This avoids the
-      # interactive prompt that android-actions/setup-android@v3 deadlocks on.
-      - name: Install Android SDK packages
+      # Install Android cmdline-tools ourselves so sdkmanager is guaranteed to
+      # exist on PATH. Newer ubuntu runners no longer preinstall the SDK.
+      - name: Install Android SDK
         run: |
-          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          ANDROID_HOME="$HOME/android-sdk"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o cmdtools.zip
+          unzip -q cmdtools.zip -d "$ANDROID_HOME/cmdline-tools"
+          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
