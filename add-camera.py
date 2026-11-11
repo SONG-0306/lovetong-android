@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-# 为 Capacitor 安卓工程打补丁：让被套壳网页里的 <input type=file> 在选择器里
-# 同时出现「相册/文件」和「拍照」两个入口。
+# 为 Capacitor 安卓工程打补丁：让被套壳网页里的 <input type=file accept=image/*>
+# 点击时弹出「拍照 / 从相册选择」。
+#   - 拍照：走 Capacitor Camera 官方插件（各机型兼容性最好，不依赖原生文件选择器）
+#   - 相册：走系统选择器
 # 仅在 workflow 传入 enable_camera=true 时运行；每次 cap add 后重新执行，幂等。
 import os
 import re
@@ -9,206 +11,185 @@ import glob
 ROOT = "android/app/src/main"
 JAVA_ROOT = os.path.join(ROOT, "java")
 
-main_files = glob.glob(os.path.join(JAVA_ROOT, "**", "MainActivity.java"), recursive=True)
-if not main_files:
-    raise SystemExit("找不到 MainActivity.java，请确认已执行 npx cap add android")
-main_path = main_files[0]
-main_dir = os.path.dirname(main_path)
+# 注入到网页的 JS：拦截图片 file input，提供「拍照/相册」选择。
+HOOK_JS = r"""
+(function () {
+  if (window.__capCameraHook) return;
+  window.__capCameraHook = true;
 
-with open(main_path, "r", encoding="utf-8") as f:
-    main_src = f.read()
+  function dataUrlToFile(dataUrl, filename) {
+    var arr = dataUrl.split(',');
+    var m = arr[0].match(/:(.*?);/);
+    var mime = m ? m[1] : 'image/jpeg';
+    var bstr = atob(arr[1]);
+    var n = bstr.length;
+    var u8 = new Uint8Array(n);
+    while (n--) u8[n] = bstr.charCodeAt(n);
+    return new File([u8], filename, { type: mime });
+  }
 
-pkg_match = re.search(r"package\s+([\w.]+);", main_src)
-if not pkg_match:
-    raise SystemExit("无法解析 MainActivity 的 package")
-pkg = pkg_match.group(1)
+  function setInputFiles(input, file) {
+    var dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
 
-# ---- 1. 写自定义 WebChromeClient ----
-client_path = os.path.join(main_dir, "CameraChromeClient.java")
-client_src = '''package __PKG__;
+  function takePhoto(input) {
+    var C = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Camera;
+    if (!C) { input.click(); return; }
+    C.getPhoto({
+      source: 'CAMERA',
+      resultType: 'DataUrl',
+      saveToGallery: false,
+      allowEditing: false
+    }).then(function (res) {
+      if (!res || !res.dataUrl) return;
+      var file = dataUrlToFile(res.dataUrl, 'photo_' + Date.now() + '.jpg');
+      setInputFiles(input, file);
+    }).catch(function (err) {
+      // 用户取消或出错：不处理
+    });
+  }
 
-import android.app.Activity;
-import android.content.ContentValues;
-import android.content.Intent;
-import android.net.Uri;
-import android.provider.MediaStore;
-import android.webkit.ValueCallback;
-import android.webkit.WebChromeClient;
-import android.webkit.WebView;
+  var suppress = false;
 
-import androidx.appcompat.app.AlertDialog;
-
-import com.getcapacitor.Bridge;
-import com.getcapacitor.BridgeWebChromeClient;
-
-// 在网页文件选择器中加入「拍照」入口（继承 Capacitor 自带的 BridgeWebChromeClient，
-// 保留其原有的定位/日志等行为，只扩展文件选择）。
-// 用自己的 AlertDialog 选择「拍照 / 从相册选择」，比塞进系统选择器的
-// EXTRA_INITIAL_INTENTS 在各机型上更可靠。
-// 拍照输出到系统媒体库(MediaStore)的 Uri，这是 OEM 相机兼容性最好的方式。
-public class CameraChromeClient extends BridgeWebChromeClient {
-    private final Activity activity;
-    private ValueCallback<Uri[]> uploadCallback;
-    private Uri cameraOutputUri;
-    private static final int REQ_CAMERA = 0xCAFE1;
-    private static final int REQ_GALLERY = 0xCAFE2;
-
-    public CameraChromeClient(Activity activity, Bridge bridge) {
-        super(bridge);
-        this.activity = activity;
+  document.addEventListener('click', function (e) {
+    if (suppress) { suppress = false; return; }
+    var t = e.target;
+    if (t && t.tagName === 'INPUT' && t.type === 'file') {
+      var accept = (t.getAttribute('accept') || '').toLowerCase();
+      if (accept.indexOf('image') === -1) return;
+      e.preventDefault();
+      e.stopPropagation();
+      showChooser(t);
     }
+  }, true);
 
-    @Override
-    public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback,
-                                     FileChooserParams params) {
-        this.uploadCallback = filePathCallback;
+  function showChooser(input) {
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483647;display:flex;align-items:center;justify-content:center;';
+    overlay.addEventListener('click', function (ev) {
+      if (ev.target === overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    });
+    var box = document.createElement('div');
+    box.style.cssText = 'background:#fff;padding:20px;border-radius:14px;width:240px;max-width:80%;text-align:center;font-family:sans-serif;color:#222;box-shadow:0 8px 30px rgba(0,0,0,.3);';
+    var title = document.createElement('div');
+    title.textContent = '选择图片来源';
+    title.style.cssText = 'font-size:16px;font-weight:600;margin-bottom:14px;';
+    var bCam = document.createElement('button');
+    bCam.textContent = '拍照';
+    bCam.style.cssText = 'display:block;width:100%;padding:12px;margin-bottom:8px;border:none;border-radius:10px;background:#007aff;color:#fff;font-size:15px;';
+    var bGal = document.createElement('button');
+    bGal.textContent = '从相册选择';
+    bGal.style.cssText = 'display:block;width:100%;padding:12px;border:none;border-radius:10px;background:#e9e9eb;color:#222;font-size:15px;';
+    box.appendChild(title); box.appendChild(bCam); box.appendChild(bGal);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+    bCam.onclick = function () { close(); takePhoto(input); };
+    bGal.onclick = function () { close(); suppress = true; input.click(); };
+  }
+})();
+"""
 
-        String[] acceptTypes = (params != null) ? params.getAcceptTypes() : null;
-        String mime = (acceptTypes != null && acceptTypes.length > 0 && acceptTypes[0] != null && !acceptTypes[0].isEmpty())
-                ? acceptTypes[0] : "*/*";
-
-        AlertDialog.Builder builder = new AlertDialog.Builder(activity);
-        builder.setTitle("选择图片来源");
-        builder.setItems(new String[]{"拍照", "从相册选择"}, (dialog, which) -> {
-            if (which == 0) {
-                openCamera();
-            } else {
-                openGallery(mime);
-            }
-        });
-        // 取消（返回键 / 点对话框外）也要回调 null，否则网页的 file input 会卡住
-        builder.setOnCancelListener(d -> finishWith(null));
-        builder.show();
-        return true;
-    }
-
-    private void openGallery(String mime) {
-        try {
-            Intent content = new Intent(Intent.ACTION_GET_CONTENT);
-            content.addCategory(Intent.CATEGORY_OPENABLE);
-            content.setType(mime);
-            activity.startActivityForResult(content, REQ_GALLERY);
-        } catch (Exception e) {
-            finishWith(null);
-        }
-    }
-
-    private void openCamera() {
-        try {
-            Intent capture = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-            if (capture.resolveActivity(activity.getPackageManager()) == null) {
-                // 设备没有相机应用，退回相册
-                openGallery("image/*");
-                return;
-            }
-            // 在媒体库建一个条目，把它的 Uri 作为拍照输出（兼容性最好）
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
-            values.put(MediaStore.Images.Media.DISPLAY_NAME, "IMG_" + System.currentTimeMillis() + ".jpg");
-            cameraOutputUri = activity.getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            if (cameraOutputUri == null) {
-                openGallery("image/*");
-                return;
-            }
-            capture.putExtra(MediaStore.EXTRA_OUTPUT, cameraOutputUri);
-            activity.startActivityForResult(capture, REQ_CAMERA);
-        } catch (Exception e) {
-            // 任何异常都退回相册，避免闪退
-            openGallery("image/*");
-        }
-    }
-
-    private void finishWith(Uri[] results) {
-        if (uploadCallback != null) {
-            uploadCallback.onReceiveValue(results);
-            uploadCallback = null;
-        }
-        cameraOutputUri = null;
-    }
-
-    public void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (uploadCallback == null) return;
-        if (requestCode == REQ_CAMERA) {
-            if (resultCode == Activity.RESULT_OK && cameraOutputUri != null) {
-                finishWith(new Uri[]{cameraOutputUri});
-            } else {
-                finishWith(null);
-            }
-        } else if (requestCode == REQ_GALLERY) {
-            if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
-                finishWith(new Uri[]{data.getData()});
-            } else {
-                finishWith(null);
-            }
-        }
-    }
-}
-'''.replace("__PKG__", pkg)
-
-with open(client_path, "w", encoding="utf-8") as f:
-    f.write(client_src)
-
-# ---- 2. 改写 MainActivity，挂上自定义 client ----
-if "CameraChromeClient" in main_src:
-    print("[add-camera] MainActivity 已打过补丁，跳过。")
-else:
-    # 补 import
-    if "import android.content.Intent;" not in main_src:
-        main_src = main_src.replace(
-            "import com.getcapacitor.BridgeActivity;",
-            "import android.content.Intent;\nimport android.os.Bundle;\n\nimport com.getcapacitor.BridgeActivity;",
-            1,
-        )
-    # 替换单行类声明为带成员的实现
-    patched = main_src.replace(
-        "public class MainActivity extends BridgeActivity {}",
-        '''public class MainActivity extends BridgeActivity {
-    private CameraChromeClient cameraChromeClient;
+MAIN_BODY = '''public class MainActivity extends BridgeActivity {
+    private boolean hookInjected = false;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        cameraChromeClient = new CameraChromeClient(this, getBridge());
-        getBridge().getWebView().setWebChromeClient(cameraChromeClient);
     }
 
     @Override
     public void onResume() {
         super.onResume();
-        // 每次回到前台都确保自定义 client 仍生效（防止被框架覆盖）
-        if (cameraChromeClient != null) {
-            getBridge().getWebView().setWebChromeClient(cameraChromeClient);
+        if (!hookInjected) {
+            injectCameraHook();
+            hookInjected = true;
         }
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (cameraChromeClient != null) {
-            cameraChromeClient.onActivityResult(requestCode, resultCode, data);
+    // 把 camera-hook.js 注入到网页，拦截图片上传框，加入拍照能力
+    private void injectCameraHook() {
+        try {
+            java.io.InputStream is = getAssets().open("camera-hook.js");
+            StringBuilder sb = new StringBuilder();
+            java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(is, "UTF-8"));
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append("\\n");
+            }
+            br.close();
+            WebView wv = getBridge().getWebView();
+            wv.evaluateJavascript(sb.toString(), null);
+        } catch (Exception e) {
+            // 注入失败不影响网页本身使用
         }
-        super.onActivityResult(requestCode, resultCode, data);
     }
-}''',
-        1,
-    )
-    if patched == main_src:
-        raise SystemExit("未能替换 MainActivity 类声明，模板可能已变更。")
-    with open(main_path, "w", encoding="utf-8") as f:
-        f.write(patched)
-    print("[add-camera] 已为 MainActivity 注入相机支持。")
+}'''
 
-# ---- 3. 确保声明 CAMERA 权限（调用外部相机应用通常不需要，但部分机型更稳） ----
-manifest_path = os.path.join(ROOT, "AndroidManifest.xml")
-with open(manifest_path, "r", encoding="utf-8") as f:
-    manifest = f.read()
-if "android.permission.CAMERA" not in manifest:
-    manifest = manifest.replace(
-        '<uses-permission android:name="android.permission.INTERNET" />',
-        '<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.CAMERA" />',
-        1,
-    )
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        f.write(manifest)
-    print("[add-camera] 已添加 CAMERA 权限声明。")
 
-print("[add-camera] 完成。package =", pkg)
+def main():
+    main_files = glob.glob(os.path.join(JAVA_ROOT, "**", "MainActivity.java"), recursive=True)
+    if not main_files:
+        raise SystemExit("找不到 MainActivity.java，请确认已执行 npx cap add android")
+    main_path = main_files[0]
+
+    with open(main_path, "r", encoding="utf-8") as f:
+        main_src = f.read()
+
+    pkg_match = re.search(r"package\s+([\w.]+);", main_src)
+    if not pkg_match:
+        raise SystemExit("无法解析 MainActivity 的 package")
+    pkg = pkg_match.group(1)
+
+    # 1) 写入注入脚本到 assets
+    assets_dir = os.path.join(ROOT, "assets")
+    os.makedirs(assets_dir, exist_ok=True)
+    with open(os.path.join(assets_dir, "camera-hook.js"), "w", encoding="utf-8") as f:
+        f.write(HOOK_JS)
+    print("[add-camera] 已写入 camera-hook.js")
+
+    # 2) 改写 MainActivity，在 onResume 注入脚本（直接按包名重写，兼容旧补丁版本）
+    # 清理上一版遗留的 CameraChromeClient（已不再使用）
+    for stale in glob.glob(os.path.join(JAVA_ROOT, "**", "CameraChromeClient.java"), recursive=True):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+
+    if "injectCameraHook" in main_src:
+        print("[add-camera] MainActivity 已打过补丁，跳过。")
+    else:
+        desired = (
+            "package " + pkg + ";\n\n"
+            "import android.os.Bundle;\n"
+            "import android.webkit.WebView;\n\n"
+            "import com.getcapacitor.BridgeActivity;\n\n"
+            + MAIN_BODY + "\n"
+        )
+        with open(main_path, "w", encoding="utf-8") as f:
+            f.write(desired)
+        print("[add-camera] 已为 MainActivity 注入相机脚本。")
+
+    # 3) 确保声明 CAMERA 权限（Capacitor Camera 插件也会加，双保险）
+    manifest_path = os.path.join(ROOT, "AndroidManifest.xml")
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = f.read()
+    if "android.permission.CAMERA" not in manifest:
+        manifest = manifest.replace(
+            '<uses-permission android:name="android.permission.INTERNET" />',
+            '<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.CAMERA" />',
+            1,
+        )
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            f.write(manifest)
+        print("[add-camera] 已添加 CAMERA 权限声明。")
+
+    print("[add-camera] 完成。package =", pkg)
+
+
+if __name__ == "__main__":
+    main()
