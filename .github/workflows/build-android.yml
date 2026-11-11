@@ -1,7 +1,27 @@
 name: Build Android APK
 
+# 一个仓库打包任意网站：
+#   - push 到 main：用默认站点（love-tong）构建
+#   - Actions 页面手动 "Run workflow"：填 URL / 名称，即可出对应 APK
 on:
   workflow_dispatch:
+    inputs:
+      site_url:
+        description: '目标网站 URL（如 https://example.com）'
+        required: true
+        default: 'https://love-tong.pages.dev'
+      app_name:
+        description: 'App 显示名称（手机桌面上的名字）'
+        required: true
+        default: 'lovetong'
+      app_id:
+        description: 'Android 包名（留空则按域名自动生成；多个 App 必须各不相同）'
+        required: false
+        default: ''
+      output_name:
+        description: '下载用的 Artifact 名称（留空则按 app_name 生成）'
+        required: false
+        default: ''
   push:
     branches: [main]
 
@@ -25,8 +45,8 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # Install Android cmdline-tools ourselves so sdkmanager is guaranteed to
-      # exist on PATH. Newer ubuntu runners no longer preinstall the SDK.
+      # 自己装 Android cmdline-tools，保证 sdkmanager 在 PATH 上。
+      # 新版 ubuntu runner 不再预装 Android SDK。
       - name: Install Android SDK
         run: |
           ANDROID_HOME="$HOME/android-sdk"
@@ -41,6 +61,21 @@ jobs:
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
+      - name: Generate Capacitor config
+        env:
+          SITE_URL: ${{ coalesce(github.event.inputs.site_url, 'https://love-tong.pages.dev') }}
+          APP_NAME: ${{ coalesce(github.event.inputs.app_name, 'lovetong') }}
+          APP_ID: ${{ github.event.inputs.app_id }}
+          OUTPUT_NAME: ${{ github.event.inputs.output_name }}
+        run: node gen-config.mjs
+
+      - name: Resolve artifact name
+        id: meta
+        run: |
+          NAME="${{ github.event.inputs.output_name }}"
+          if [ -z "$NAME" ]; then NAME="${{ github.event.inputs.app_name }}-debug"; fi
+          echo "artifact_name=$NAME" >> "$GITHUB_OUTPUT"
+
       - name: Add and sync Android platform
         run: npx cap add android && npx cap sync android
 
@@ -50,6 +85,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: lovetong-android-debug
+          name: ${{ steps.meta.outputs.artifact_name }}
           path: android/app/build/outputs/apk/debug/*.apk
           retention-days: 3
