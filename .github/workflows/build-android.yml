@@ -15,20 +15,29 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install Capacitor
+      - name: Install dependencies
         run: npm install
 
-      - name: Add and sync Android platform
-        run: npx cap add android && npx cap sync android
-
-      - name: Set up JDK
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # GitHub ubuntu runner ships a preinstalled Android SDK at $ANDROID_HOME.
+      # We accept all licenses non-interactively (yes | sdkmanager --licenses)
+      # and install the platform/build-tools Capacitor needs. This avoids the
+      # interactive prompt that android-actions/setup-android@v3 deadlocks on.
+      - name: Install Android SDK packages
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Add and sync Android platform
+        run: npx cap add android && npx cap sync android
 
       - name: Build debug APK
         run: cd android && chmod +x ./gradlew && ./gradlew assembleDebug
