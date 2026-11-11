@@ -63,8 +63,8 @@ jobs:
 
       - name: Generate Capacitor config
         env:
-          SITE_URL: ${{ coalesce(github.event.inputs.site_url, 'https://love-tong.pages.dev') }}
-          APP_NAME: ${{ coalesce(github.event.inputs.app_name, 'lovetong') }}
+          SITE_URL: ${{ github.event.inputs.site_url || 'https://love-tong.pages.dev' }}
+          APP_NAME: ${{ github.event.inputs.app_name || 'lovetong' }}
           APP_ID: ${{ github.event.inputs.app_id }}
           OUTPUT_NAME: ${{ github.event.inputs.output_name }}
         run: node gen-config.mjs
